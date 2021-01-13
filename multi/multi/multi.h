@@ -1,4 +1,6 @@
 #pragma once
+#include <stdint.h>
+#include <bitset>
 #include <chrono>
 #include <thread>
 #include <mutex>
@@ -15,6 +17,154 @@ namespace multi {
 	}
 	class runner;
 	struct mobj;
+	struct tHandle {
+		void* handle = nullptr; // On windows this is a HANDLE object, On Linux this is a pthread
+	};
+#ifdef _WIN32 || _WIN64
+	#include <Windows.h>
+	/// <summary>
+	/// Gets a handle to a thread
+	/// </summary>
+	/// <returns>A handle to a thread</returns>
+	tHandle GetThreadHandle() {
+		tHandle hand;
+		hand.handle = GetCurrentThread();
+		return hand;
+	}
+	/// <summary>
+	/// This function is slow and can take many cpu cycles to be performed. Use this function within the thread itself. 
+	/// Warning: If core is set to a core that doesn't exist your thread simply wont run.
+	/// </summary>
+	/// <param name="core"> The processing core you want the thread to run on.</param>
+	/// <returns> Success if affinity could be set</returns>
+	bool SetAffinityCore(uint32_t core, tHandle* hand = nullptr) {
+		tHandle t = GetThreadHandle();
+		hand = hand ? hand : &t;
+		if (core > processor_count || core < 0)
+			return false; // This is a non existing core!
+		auto mask = (static_cast<DWORD_PTR>(1) << core);
+		SetThreadAffinityMask(hand->handle, mask);
+		return true;
+	}
+	/// <summary>
+	/// This function is slow and can take many cpu cycles to be performed. Use this function within the thread itself. 
+	/// Warning: If mask is set in a way where all the bits are equal to zero, or a bit is set for a non existing thread, your thread simply wont run.
+	/// </summary>
+	/// <param name="mask"> An unsigned it</param>
+	/// <returns> Success if affinity could be set</returns>
+	bool SetAffinityMask(uint32_t mask, tHandle* hand = nullptr) {
+		tHandle t = GetThreadHandle();
+		hand = hand ? hand : &t;
+		if ((static_cast<DWORD_PTR>(1) << processor_count) < mask)
+			return false;
+		SetThreadAffinityMask(hand->handle, mask);
+		return true;
+	}
+	/// <summary>
+	/// Gets the affinity mask of the currently running thread!
+	/// </summary>
+	/// <returns>The mask as an unsigned 32bit number.</returns>
+	uint32_t GetAffinityMask(tHandle* hand = nullptr) {
+		tHandle t = GetThreadHandle();
+		hand = hand ? hand : &t;
+		DWORD mask = 1;
+		DWORD old = 0;
+		HANDLE thread = hand->handle;
+		// try every CPU one by one until one works or none are left
+		while (mask)
+		{
+			old = SetThreadAffinityMask(thread, mask);
+			if (old)
+			{   // this one worked
+				SetThreadAffinityMask(thread, old); // restore original
+				return old;
+			}
+			else
+			{
+				if (GetLastError() != ERROR_INVALID_PARAMETER)
+					return 0; // fatal error, might as well throw an exception
+			}
+			mask <<= 1;
+		}
+
+		return 0;
+	}
+	/// <summary>
+	/// Get the core of the threads set affinity
+	/// </summary>
+	/// <returns> The core the thread is running on. If the affinity is set to multiple cores -1 is returned</returns>
+	int GetAffinityCore(tHandle* hand = nullptr) {
+		auto mask = GetAffinityMask(hand);
+		auto b = log2(mask);
+		if (floor(b) == b)
+			return b;
+		return -1;
+	}
+
+#elif __unix || __unix__
+	// Unable to currently test!
+#error Unsupported platform
+#elif __APPLE__ || __MACH__
+	// Unable to currently test!
+#error Unsupported platform
+#elif __linux__
+	#include <pthread.h>
+	#include <stdio.h>
+	#include <stdlib.h>
+	tHandle GetThreadHandle() {
+		tHandle hand;
+		hand.handle = &pthread_self();
+		return hand;
+	}
+	bool SetAffinityCore(uint32_t core, tHandle* hand = nullptr) {
+		hand = hand ? hand : &GetThreadHandle();
+		if (core > processor_count || core < 0)
+			return false; // This is a non existing core!
+		cpu_set_t cpuset;
+		pthread_t thread = *((pthread_t*)hand->handle);
+		CPU_ZERO(&cpuset);
+		CPU_SET(core, &cpuset);
+		return pthread_setaffinity_np(thread, sizeof(cpuset), &cpuset) == 0;
+	}
+	bool SetAffinityMask(uint32_t mask, tHandle * hand = nullptr) {
+		hand = hand ? hand : &GetThreadHandle();
+		cpu_set_t cpuset;
+		CPU_ZERO(&cpuset);
+		CPU_SET(processor_count, &cpuset);
+		if (cpuset < mask)
+			return false;
+		cpuset = mask;
+		pthread_t thread = *((pthread_t*)hand->handle);
+		return pthread_setaffinity_np(thread, sizeof(cpuset), &cpuset) == 0;
+	}
+	/// <summary>
+	/// Gets the affinity mask of the currently running thread!
+	/// </summary>
+	/// <returns>The mask as an unsigned 32bit number.</returns>
+	uint32_t GetAffinityMask(tHandle* hand = nullptr) {
+		hand = hand ? hand : &GetThreadHandle();
+		cpu_set_t cpuset;
+		auto s = pthread_getaffinity_np(*((pthread_t*)hand->handle), sizeof(cpi_set_t), &cupset);
+
+		return 0;
+	}
+	/// <summary>
+	/// Get the core of the threads set affinity
+	/// </summary>
+	/// <returns> The core the thread is running on. If the affinity is set to multiple cores -1 is returned</returns>
+	int GetAffinityCore() {
+		auto mask = GetAffinityMask();
+		auto b = log2(mask);
+		if (floor(b) == b)
+			return b;
+		return -1;
+	}
+#elif __FreeBSD__
+	// Unable to currently test!
+#error Unsupported platform
+#else
+#error Unsupported platform
+#endif
 	enum class priority { core, very_high, high, above_normal, normal, below_normal, low, very_low, idle };
 	enum class scheduler { custom, round_robin };
 	enum class status { error, stopped, running, paused };
@@ -126,7 +276,6 @@ namespace multi {
 			auto val = queue_.front();
 			return val;
 		}
-
 		bool empty() {
 			return queue_.empty();
 		}
