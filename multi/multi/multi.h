@@ -1,4 +1,12 @@
 #pragma once
+#ifdef _WIN32
+#include <windows.h>
+#elif MACOS
+#include <sys/param.h>
+#include <sys/sysctl.h>
+#else
+#include <unistd.h>
+#endif
 #include <stdint.h>
 #include <bitset>
 #include <chrono>
@@ -8,10 +16,12 @@
 #include <condition_variable>
 #include <list>
 #include <type_traits>
+#include <stdio.h>
+
 namespace multi {
 	// Capture this when code is loaded up!
 	const std::thread::id mainThreadID = std::this_thread::get_id();
-	const unsigned int processor_count = std::thread::hardware_concurrency();;
+	const unsigned int processor_count = std::thread::hardware_concurrency();
 	bool isMainThread() {
 		return mainThreadID == std::this_thread::get_id();
 	}
@@ -19,17 +29,92 @@ namespace multi {
 	struct mobj;
 	struct tHandle {
 		void* handle = nullptr; // On windows this is a HANDLE object, On Linux this is a pthread
+		void setHandle(void* hand) {
+			handle = hand;
+		}
 	};
 #ifdef _WIN32 || _WIN64
-	#include <Windows.h>
+	uint32_t GetLogicalCoreCount() {
+		return std::thread::hardware_concurrency();
+	}
+	/// <summary>
+	/// Get the physical core count of the cpu! Does not include logical cpus
+	/// </summary>
+	/// <returns>Number of physical cores</returns>
+	uint32_t GetPhysicalCoreCount() {
+		PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX buffer = NULL;
+		PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX ptr = NULL;
+		BOOL rc;
+		DWORD length = 0;
+		DWORD offset = 0;
+		DWORD ncpus = 0;
+		DWORD prev_processor_info_size = 0;
+		for (;;) {
+			rc = GetLogicalProcessorInformationEx(
+				RelationAll, buffer, &length);
+			if (rc == FALSE) {
+				if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+					if (buffer) {
+						free(buffer);
+					}
+					buffer = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)malloc(length);
+					if (NULL == buffer) {
+						return NULL;
+					}
+				}
+				else {
+					goto return_none;
+				}
+			}
+			else {
+				break;
+			}
+		}
+		ptr = buffer;
+		while (offset < length) {
+			// Advance ptr by the size of the previous
+			// SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX struct.
+			ptr = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*)\
+				(((char*)ptr) + prev_processor_info_size);
+
+			if (ptr->Relationship == RelationProcessorCore) {
+				ncpus += 1;
+			}
+
+			// When offset == length, we've reached the last processor
+			// info struct in the buffer.
+			offset += ptr->Size;
+			prev_processor_info_size = ptr->Size;
+		}
+
+		free(buffer);
+		if (ncpus != 0) {
+			return ncpus;
+		}
+		else {
+			return NULL;
+		}
+
+	return_none:
+		if (buffer != NULL)
+			free(buffer);
+		return NULL;
+	}
 	/// <summary>
 	/// Gets a handle to a thread
 	/// </summary>
 	/// <returns>A handle to a thread</returns>
-	tHandle GetThreadHandle() {
-		tHandle hand;
-		hand.handle = GetCurrentThread();
+	tHandle* GetThreadHandle() {
+		tHandle* hand = new tHandle;
+		HANDLE hHandle;
+		DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &hHandle, 0, FALSE, DUPLICATE_SAME_ACCESS);
+		hand->handle = hHandle;
 		return hand;
+	}
+	void* GetThreadHandle(bool b) {
+		HANDLE hHandle;
+		DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &hHandle, 0, FALSE, DUPLICATE_SAME_ACCESS);
+		return hHandle;
 	}
 	/// <summary>
 	/// This function is slow and can take many cpu cycles to be performed. Use this function within the thread itself. 
@@ -38,8 +123,7 @@ namespace multi {
 	/// <param name="core"> The processing core you want the thread to run on.</param>
 	/// <returns> Success if affinity could be set</returns>
 	bool SetAffinityCore(uint32_t core, tHandle* hand = nullptr) {
-		tHandle t = GetThreadHandle();
-		hand = hand ? hand : &t;
+		hand = hand ? hand : GetThreadHandle();
 		if (core > processor_count || core < 0)
 			return false; // This is a non existing core!
 		auto mask = (static_cast<DWORD_PTR>(1) << core);
@@ -53,8 +137,7 @@ namespace multi {
 	/// <param name="mask"> An unsigned it</param>
 	/// <returns> Success if affinity could be set</returns>
 	bool SetAffinityMask(uint32_t mask, tHandle* hand = nullptr) {
-		tHandle t = GetThreadHandle();
-		hand = hand ? hand : &t;
+		hand = hand ? hand : GetThreadHandle();
 		if ((static_cast<DWORD_PTR>(1) << processor_count) < mask)
 			return false;
 		SetThreadAffinityMask(hand->handle, mask);
@@ -65,8 +148,7 @@ namespace multi {
 	/// </summary>
 	/// <returns>The mask as an unsigned 32bit number.</returns>
 	uint32_t GetAffinityMask(tHandle* hand = nullptr) {
-		tHandle t = GetThreadHandle();
-		hand = hand ? hand : &t;
+		hand = hand ? hand : GetThreadHandle();
 		DWORD mask = 1;
 		DWORD old = 0;
 		HANDLE thread = hand->handle;
@@ -108,16 +190,23 @@ namespace multi {
 	// Unable to currently test!
 #error Unsupported platform
 #elif __linux__
+	// All code is currently untested!
 	#include <pthread.h>
 	#include <stdio.h>
 	#include <stdlib.h>
-	tHandle GetThreadHandle() {
-		tHandle hand;
-		hand.handle = &pthread_self();
+	uint32_t GetLogicalCoreCount() {
+		return std::thread::hardware_concurrency();
+	}
+	uint32_t GetPhysicalCoreCount() {
+		auto file = *popen("lscpu -p=cpu,core", "rb");
+	}
+	tHandle* GetThreadHandle() {
+		tHandle* hand;
+		hand->handle = &pthread_self();
 		return hand;
 	}
 	bool SetAffinityCore(uint32_t core, tHandle* hand = nullptr) {
-		hand = hand ? hand : &GetThreadHandle();
+		hand = hand ? hand : GetThreadHandle();
 		if (core > processor_count || core < 0)
 			return false; // This is a non existing core!
 		cpu_set_t cpuset;
@@ -127,7 +216,7 @@ namespace multi {
 		return pthread_setaffinity_np(thread, sizeof(cpuset), &cpuset) == 0;
 	}
 	bool SetAffinityMask(uint32_t mask, tHandle * hand = nullptr) {
-		hand = hand ? hand : &GetThreadHandle();
+		hand = hand ? hand : GetThreadHandle();
 		cpu_set_t cpuset;
 		CPU_ZERO(&cpuset);
 		CPU_SET(processor_count, &cpuset);
@@ -142,10 +231,10 @@ namespace multi {
 	/// </summary>
 	/// <returns>The mask as an unsigned 32bit number.</returns>
 	uint32_t GetAffinityMask(tHandle* hand = nullptr) {
-		hand = hand ? hand : &GetThreadHandle();
+		hand = hand ? hand : GetThreadHandle();
 		cpu_set_t cpuset;
 		auto s = pthread_getaffinity_np(*((pthread_t*)hand->handle), sizeof(cpi_set_t), &cupset);
-
+		// Finish this
 		return 0;
 	}
 	/// <summary>
