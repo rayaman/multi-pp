@@ -33,6 +33,14 @@ namespace multi {
 			handle = hand;
 		}
 	};
+	const uint8_t STATUS_STOPPED = 0;
+	const uint8_t STATUS_RUNNING = 1;
+	const uint8_t STATUS_YIELDING = 2;
+	const uint8_t STATUS_ERRORED = 3;
+	struct tStatus {
+		uint8_t active : 2;
+		uint8_t stop : 1;
+	};
 #ifdef _WIN32 || _WIN64
 	uint32_t GetLogicalCoreCount() {
 		return std::thread::hardware_concurrency();
@@ -108,13 +116,28 @@ namespace multi {
 		tHandle* hand = new tHandle;
 		HANDLE hHandle;
 		DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &hHandle, 0, FALSE, DUPLICATE_SAME_ACCESS);
-		hand->handle = hHandle;
+		hand->setHandle(hHandle);
 		return hand;
 	}
+	/// <summary>
+	/// Get's a raw handle to a thread
+	/// </summary>
+	/// <param name="b"></param>
+	/// <returns></returns>
 	void* GetThreadHandle(bool b) {
 		HANDLE hHandle;
 		DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &hHandle, 0, FALSE, DUPLICATE_SAME_ACCESS);
 		return hHandle;
+	}
+	/// <summary>
+	/// Converts a raw handle to a thandle
+	/// </summary>
+	/// <param name="hand"></param>
+	/// <returns></returns>
+	tHandle* GetThreadHandle(void* hand) {
+		tHandle* h = new tHandle;
+		h->setHandle(hand);
+		return h;
 	}
 	/// <summary>
 	/// This function is slow and can take many cpu cycles to be performed. Use this function within the thread itself. 
@@ -256,7 +279,6 @@ namespace multi {
 #endif
 	enum class priority { core, very_high, high, above_normal, normal, below_normal, low, very_low, idle };
 	enum class scheduler { custom, round_robin };
-	enum class status { error, stopped, running, paused };
 	typedef std::chrono::high_resolution_clock Clock;
 	typedef std::chrono::nanoseconds nanoseconds;
 	typedef std::chrono::microseconds microseconds;
